@@ -1,0 +1,36 @@
+# to generate requirements.txt: pip-compile requirements.in --resolver=backtracking
+# python3 -m pip install ipykernel -U --user --force-reinstall
+
+fire
+tqdm
+ipywidgets
+black
+flake8
+isort
+pandas
+matplotlib
+seaborn
+tensorboard
+transformers[torch]
+fsspec
+gcsfs
+psutil
+joblib
+pytest
+nomic
+wordcloud
+
+# kNN-LM
+torch>=1.9.0
+transformers
+datasets
+scipy
+faiss-gpu==1.7.2
+
+# Continual Learning
+pandarallel
+spacy
+sentence_transformers
+hdbscan
+umap-learn
+altair
