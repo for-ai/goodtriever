@@ -2,8 +2,9 @@
 
 Code for "Goodtriever: Adaptive Toxicity Mitigation with Retrieval-augmented Models".
 
-[[Paper]]()[[Code]]()[[Data]](https://huggingface.co/datasets/luizapzbn/goodtriever-data)
+[[Paper]](https://arxiv.org/abs/2310.07589)[[Data]](https://huggingface.co/datasets/luizapzbn/goodtriever-data)
 
+Checkout to branch "[from-one-to-many](https://github.com/for-ai/goodtriever/tree/from-one-to-many)" to access the code for "From One to Many: Expanding the Scope of Toxicity Mitigation in Language Models".
 
 ![Goodtriever](images/goodtriever.png)
 
