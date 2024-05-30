@@ -3,6 +3,7 @@
 Deeply inspired/modified from
 https://github.com/allenai/real-toxicity-prompts/blob/master/utils/perspective_api.py
 """
+
 import collections
 import json
 import multiprocessing as mp
@@ -59,8 +60,17 @@ class PerspectiveAPI:
         self.next_uid = 0
 
     def request(
-        self, texts: Union[str, List[str]]
+        self, texts: Union[str, List[str]], custom_attrs: Optional[List[str]] = None
     ) -> List[Tuple[Optional[Dict[str, Any]], Optional[HttpError]]]:
+        """_summary_
+
+        Args:
+            texts (Union[str, List[str]]): List of texts to be evaluated by Perspective API.
+            custom_attrs (Optional[List[str]], optional): List of attributes to be
+            evaluated by Perspective API. If None, all attributes will be used. Some
+            languages only support "TOXICITY,". For more options, check Perspective's
+            documentation. Defaults to None.
+        """
         if isinstance(texts, str):
             texts = [texts]
 
@@ -85,7 +95,7 @@ class PerspectiveAPI:
         batch_request = self.service.new_batch_http_request()
         for uid, text in zip(responses.keys(), texts):
             batch_request.add(
-                self._make_request(text, self.service),
+                self._make_request(text, self.service, custom_attrs=custom_attrs),
                 callback=response_callback,
                 request_id=uid,
             )
@@ -98,6 +108,7 @@ class PerspectiveAPI:
         corpus: Union[Iterable[str], Iterable[Tuple[str, str]]],
         output_file: Union[str, Path],
         pbar: tqdm = None,
+        custom_attrs: Optional[List[str]] = None,
     ):
         # Check for output file
         output_file = Path(output_file)
@@ -118,7 +129,9 @@ class PerspectiveAPI:
                 if isinstance(batch[0], tuple):
                     request_ids, batch = zip(*batch)
 
-                for j, (response, exception) in enumerate(self.request(batch)):
+                for j, (response, exception) in enumerate(
+                    self.request(batch, custom_attrs)
+                ):
                     response_dict = {
                         "request_id": request_ids[j] if request_ids else i,
                         "response": response,
@@ -149,10 +162,11 @@ class PerspectiveAPI:
         return client
 
     @staticmethod
-    def _make_request(text: str, service):
+    def _make_request(text: str, service, custom_attrs: List[str] = None):
+        attrs = PERSPECTIVE_API_ATTRIBUTES if custom_attrs is None else custom_attrs
         analyze_request = {
             "comment": {"text": text},
-            "requestedAttributes": {attr: {} for attr in PERSPECTIVE_API_ATTRIBUTES},
+            "requestedAttributes": {attr: {} for attr in attrs},
             "spanAnnotations": True,
             "doNotStore": True,
         }
@@ -162,7 +176,13 @@ class PerspectiveAPI:
 class PerspectiveWorker:
     SENTINEL = "STOP"
 
-    def __init__(self, out_file: Path, total: int, rate_limit: int):
+    def __init__(
+        self,
+        out_file: Path,
+        total: int,
+        rate_limit: int,
+        custom_attrs: Optional[List[str]] = None,
+    ):
         """Multiprocess requests scores from PerspectiveAPI at a given `rate_limit`.
 
         Args:
@@ -170,6 +190,10 @@ class PerspectiveWorker:
             total (int): Total number of requests.
             rate_limit (int): PerspectiveAPI requests per second limit.
                 By default its 1 but you can request a higher value.
+            custom_attrs (Optional[List[str]], optional): List of attributes to be
+                evaluated by Perspective API. If None, all attributes will be used. Some
+                languages only support "TOXICITY,". For more options, check Perspective's
+                documentation. Defaults to None.
         """
         if not rate_limit:
             print("Disabling Perspective API (rps is 0)")
@@ -186,7 +210,7 @@ class PerspectiveWorker:
         self.task_queue = mp.Queue()
         self.process = mp.Process(
             target=self.perspective_worker,
-            args=(self.task_queue, out_file, total, rate_limit),
+            args=(self.task_queue, out_file, total, rate_limit, custom_attrs),
         )
         self.process.start()
 
@@ -207,12 +231,19 @@ class PerspectiveWorker:
 
     @classmethod
     def perspective_worker(
-        cls, queue: mp.Queue, responses_file: Path, total: int, rate_limit: int
+        cls,
+        queue: mp.Queue,
+        responses_file: Path,
+        total: int,
+        rate_limit: int,
+        custom_attrs: Optional[List[str]] = None,
     ):
         queue_iter = iter(queue.get, cls.SENTINEL)
         api = PerspectiveAPI(rate_limit=rate_limit)
         pbar = tqdm(total=total, dynamic_ncols=True, position=1)
-        api.request_bulk(queue_iter, output_file=responses_file, pbar=pbar)
+        api.request_bulk(
+            queue_iter, output_file=responses_file, pbar=pbar, custom_attrs=custom_attrs
+        )
 
 
 def test_perspective_api():

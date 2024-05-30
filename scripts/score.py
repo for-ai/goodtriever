@@ -3,8 +3,9 @@
 Heavily inspired by:
 https://github.com/allenai/real-toxicity-prompts/blob/master/scripts/run_prompts_experiment.py
 """
+
 from pathlib import Path
-from typing import Optional, List
+from typing import List, Optional
 
 import fire
 import numpy as np
@@ -25,6 +26,7 @@ def main(
     column_name: str = "generations",
     output_folder: Optional[str] = None,
     perspective_rate_limit: int = 1,
+    custom_attrs: Optional[List[str]] = None,
 ) -> None:
     """Score sequences of text with PerspectiveAPI.
 
@@ -39,6 +41,10 @@ def main(
             to the same folder as `input_filename`. Defaults to None.
         perspective_rate_limit (int, optional): Maximum number of API calls per second.
             Defaults to 1.
+        custom_attrs (list, optional): List of attributes to be
+            evaluated by Perspective API. If None, all attributes will be used. Some
+            languages only support "TOXICITY,". For more options, check Perspective's
+            documentation. Defaults to None.
 
     Raises:
         NotImplementedError: If `column_name` values are not lists or dicts or don't
@@ -54,7 +60,9 @@ def main(
         previous_filename=input_filename,
     )
 
-    df = pd.read_json(input_filename, lines=True)
+    df = pd.read_json(
+        input_filename, lines=True if "jsonl" in input_filename.suffix else False
+    )
 
     if isinstance(df.iloc[0][column_name], dict):
         df[column_name] = df[column_name].apply(lambda x: [x.get("text")])
@@ -74,6 +82,7 @@ def main(
         out_file=output_file,
         total=df.shape[0] * num_samples,
         rate_limit=perspective_rate_limit,
+        custom_attrs=custom_attrs,
     )
 
     # Flatten and make list

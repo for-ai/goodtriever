@@ -20,7 +20,7 @@ ALLOWED_MODELS = ["gpt2", "gpt2-medium", "gpt2-large"]
 
 def build_filename(gen_args, knn_args) -> str:
     """Build filename from user arguments."""
-    name += f"prompted_{gen_args.model_name}"
+    name = f"prompted_{gen_args.model_name}"
 
     if knn_args.knn:
         name += "_knn"

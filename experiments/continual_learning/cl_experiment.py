@@ -1,16 +1,13 @@
 import logging
 import tempfile
+from collections import defaultdict
+from pathlib import Path
+from typing import List, Optional, Tuple
+
 import fire
 import pandas as pd
 
-from collections import defaultdict
-from pathlib import Path
-from typing import Optional, Tuple
-
-from experiments.continual_learning.components import (
-    build_dstore,
-    train_expert,
-)
+from experiments.continual_learning.components import build_dstore, train_expert
 from experiments.continual_learning.utils import (
     evaluate,
     extract_domains_from_file_list,
@@ -22,44 +19,59 @@ logger = logging.getLogger(__name__)
 
 
 def main(
+    model_name: str,
+    perplexity_model: str,
+    prompts_path: str,
+    train_folder: str,
+    kind: str = "knn",
     domains: Optional[Tuple] = None,
-    model_name: str = "gpt2-large",
     toxicity_choices: Tuple = ("toxic", "nontoxic"),
-    prompts_path: str = "data/continual_mitigation/prompts/wilds_5_clusters_200_samples_toxic.jsonl",
-    train_folder: str = "data/continual_mitigation/domains/train",
+    toxic_pattern: str = "wilds_*_toxic.json",
+    nontoxic_pattern: str = "wilds_*_nontoxic.json",
     output_folder: str = "outputs/experiments/continual_learning",
     experiment_name: str = "continual_mitigation",
     perspective_rate_limit: str = 90,
     batch_size: int = 4,
-    group_toxicity_by: str = "domain",
-    kind: str = "knn",
+    group_results_by: str = "domain",
     pretrained_toxic: Optional[str] = None,
     pretrained_nontoxic: Optional[str] = None,
     dstore_size: Optional[int] = None,
     num_prompts: Optional[int] = None,
-    multitask: Optional[bool] = False,
+    multitask: Optional[bool] = True,
+    custom_attrs: Optional[List[str]] = None,
+    lmbda: float = 2.0,
+    knn_temp: int = 100,
+    filter_p: float = 0.9,
+    learning_rate: float = 5e-5,
 ):
     """Run continual learning experiments.
 
+    If multitask is True (default), data is continually added to Goodtriever's datastores
+    and DExperts' train file. If False, only the current domain is used for training or
+    in the datastore.
+
     Args:
+        model_name (str, optional): Base model, from huggingface.
+        perplexity_model (str, optional): Model for ppl evaluation, from huggingface.
+        prompts_path (str, optional): Path to prompts file.
+        train_folder (str, optional): Folder that contains all training files.
+        kind (str, optional): Options are ('knn', 'dexperts'). Defaults to "knn".
         domains (Optional[Tuple], optional): The list of domains. If None,
             they will be inferred from files. Defaults to None.
-        model_name (str, optional): Base model. Defaults to "gpt2-large".
         toxicity_choices (Tuple, optional): Which datastores will be continually improved.
             Defaults to ("toxic", "nontoxic").
-        prompts_path (str, optional): Path to main prompts file.
-            Defaults to "data/continual_mitigation/prompts/wilds_5_clusters_200_samples_toxic.jsonl".
-        train_folder (str, optional): Folder that contains all training files.
-            Defaults to "data/continual_mitigation/domains/train".
+        toxic_pattern (str, optional): Pattern to find toxic files in `train_folder`.
+            Defaults to "wilds_*_toxic.json".
+        nontoxic_pattern (str, optional): Pattern to find nontoxic files in `train_folder`.
+            Defaults to "wilds_*_nontoxic.json".
         output_folder (str, optional): Folder to save experiments output.
             Defaults to "outputs/experiments/continual_learning".
         experiment_name (str, optional): Experiment name will create a new folder inside `output_folder`.
             Defaults to "continual_mitigation".
         perspective_rate_limit (str, optional): Perspective API rate limit. Defaults to 90.
         batch_size (int, optional): Batch size for inference. Defaults to 4.
-        group_toxicity_by (str, optional): This column should be in the prompts file and
+        group_results_by (str, optional): This column should be in the prompts file and
             it is used to compute domain-specific toxicity metrics. Defaults to "domain".
-        kind (str, optional): Options are ('knn', 'dexperts'). Defaults to "knn".
         pretrained_toxic (Optional[str], optional): Path to a pretrained
             toxic datastore or expert. Defaults to None.
         pretrained_nontoxic (Optional[str], optional): Path to a pretrained
@@ -68,9 +80,18 @@ def main(
             Defaults to None.
         num_prompts (Optional[int], optional): Number of prompts to be evaluated.
             If None, will use all. Defaults to None.
-        multitask (Optional[bool], optional): If True, DExperts will be run
-            in the continual learning manner. At every step, experts will be
-            trained with all data available. Defaults to False.
+        multitask (Optional[bool], optional): If True, DExperts and Goodtriever will be run
+            in the continual learning manner. At every step, DExperts will be
+            trained with all data available. Goodtriever will update a previously
+            updated datastore. Defaults to True.
+        custom_attrs (Optional[List[str]], optional): List of attributes to be
+            evaluated by Perspective API. If None, all attributes will be used. Some
+            languages only support "TOXICITY,". For more options, check Perspective's
+            documentation. Defaults to None.
+        lmbda (float, optional): Lambda/alpha parameter for Goodtriever/DExperts. Defaults to 2.0.
+        knn_temp (int, optional): Temperature parameter for Goodtriever. Defaults to 100.
+        filter_p (float, optional): top-p filter before ensembling. Defaults to 0.9.
+        learning_rate (float, optional): Learning rate for DExperts. Defaults to 5e-5.
 
     Raises:
         NotImplementedError: If you set an invalid `kind`.
@@ -85,10 +106,11 @@ def main(
         kind,
     )
     if multitask:
-        multitask_files = {
-            "toxic": tempfile.NamedTemporaryFile(suffix=".json", mode="w+"),
-            "nontoxic": tempfile.NamedTemporaryFile(suffix=".json", mode="w+"),
-        }
+        if kind == "dexperts":
+            multitask_files = {
+                "toxic": tempfile.NamedTemporaryFile(suffix=".json", mode="w+"),
+                "nontoxic": tempfile.NamedTemporaryFile(suffix=".json", mode="w+"),
+            }
 
     # Logger setup
     (output_folder / "logs").mkdir(parents=True, exist_ok=True)
@@ -104,8 +126,8 @@ def main(
     # Domains setup
     train_folder = Path(train_folder)
     files = {
-        "toxic": sorted(list(train_folder.glob("wilds_*_toxic.json"))),
-        "nontoxic": sorted(list(train_folder.glob("wilds_*_nontoxic.json"))),
+        "toxic": sorted(list(train_folder.glob(toxic_pattern))),
+        "nontoxic": sorted(list(train_folder.glob(nontoxic_pattern))),
     }
     pretrained = {"toxic": pretrained_toxic, "nontoxic": pretrained_nontoxic}
     domains = domains or extract_domains_from_file_list(files["toxic"])
@@ -131,7 +153,7 @@ def main(
                 )
 
                 try:
-                    file = [f for f in files[toxicity] if domain in str(f)][0]
+                    file = [f for f in files[toxicity] if domain in str(f.name)][0]
                 except IndexError:
                     # This will skip dstore building, but will return the pretrained path if any
                     logger.info(
@@ -141,8 +163,14 @@ def main(
                     paths[toxicity] = pretrained[toxicity]
                     continue
 
-                if multitask:
+                if multitask and kind in ["dexperts"]:
+                    logger.info(f"Adding file: {file}")
                     curr_df = pd.read_json(file)
+
+                    # temporary
+                    if dstore_size is not None:
+                        curr_df = curr_df.sample(dstore_size, random_state=42)
+
                     logger.info(f"Current number of samples: {curr_df.shape[0]}")
 
                     if d > 0:
@@ -175,12 +203,16 @@ def main(
                     )
 
                 elif kind == "dexperts":
+                    # always start from fresh pretrained model
+                    if multitask:
+                        pretrained[toxicity] = model_name
                     path = train_expert(
                         output_folder=model_path,
                         expert_name=f"finetune_{model_name}_{d}_{domain}_{toxicity}",
                         train_file=file,
                         model_name=model_name,
                         epochs=1,
+                        learning_rate=learning_rate,
                         pretrained_path=pretrained[toxicity],
                         log_folder=output_folder / f"logs/train_{toxicity}.log",
                         done=done,
@@ -205,11 +237,16 @@ def main(
                 prompts_path=prompts_path,
                 toxic_model=paths["toxic"],
                 nontoxic_model=paths["nontoxic"],
-                perspective_rate_limit=perspective_rate_limit,
-                group_toxicity_by=group_toxicity_by,
+                rate_limit=perspective_rate_limit,
+                group_results_by=group_results_by,
                 num_prompts=num_prompts,
                 kind=kind,
                 batch_size=batch_size,
+                perplexity_model=perplexity_model,
+                custom_attrs=custom_attrs,
+                lmbda=lmbda,
+                knn_temp=knn_temp,
+                filter_p=filter_p,
             )
 
     except KeyboardInterrupt:

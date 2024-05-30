@@ -1,31 +1,35 @@
-import gc
 import logging
-import os
-import time
+from collections import defaultdict
 from pathlib import Path
-from typing import Tuple, Optional, Union, Iterable
+from typing import Iterable, Optional, Tuple, Union
 
 import fire
-import torch
-from logger import configure_logger
+import pandas as pd
+
+from experiments.continual_learning.components import build_dstore, train_expert
+from experiments.continual_learning.utils import evaluate
+from experiments.logger import configure_logger
 
 
 def main(
+    model_name: str,
+    prompts_path: str,
+    perplexity_model: str = None,
     toxic_tokens: Union[int, Tuple] = None,
     nontoxic_tokens: Union[int, Tuple] = (10_000, 500_000, None),
     num_prompts: Optional[int] = None,
     output_folder: str = "outputs/experiments/",
     experiment_name: str = "datastore_size",
-    rate_limit: int = 30,
-    dstores: str = "both",
-    model_name: str = "gpt2-large",
+    perspective_rate_limit: int = 30,
     toxic_train_file: str = "data/jigsaw/toxicity_gte0.5_clean.json",
     nontoxic_train_file: str = "data/jigsaw/toxicity_eq0_half_clean.json",
-    method: str = "ensemble",
+    kind: str = "knn",
     lmbda: float = 2.0,
-    temperature: int = 100,
-    prompts_path: str = "data/dexperts/prompts/nontoxic_prompts-10k.jsonl",
-    only_generate: bool = False,
+    knn_temp: int = 100,
+    filter_p: float = 0.9,
+    group_results_by: Optional[str] = None,
+    batch_size: int = 4,
+    custom_attrs: Optional[Tuple[str]] = None,
 ):
     """Run prompted generation experiment with varying datastore sizes.
 
@@ -38,6 +42,9 @@ def main(
     it will be repeated to match the size of the other.
 
     Args:
+        model_name (str, optional): Base model to use.
+        prompts_path (str, optional): Path to prompts path.
+        perplexity_model (str, optional): Perplexity model to use.
         toxic_tokens (Union[int, Tuple], optional): Tuple of the size of the
             toxic datastore at each experiment. If None, uses all available tokens.
             Defaults to None.
@@ -49,30 +56,35 @@ def main(
         output_folder (str, optional): Name of output folder.
             Defaults to "outputs/experiments/".
         experiment_name (str, optional): Name of experiment. Defaults to "datastore_size".
-        rate_limit (int, optional): Perspective API Rate Limit. Defaults to 30.
-        dstores (str, optional): Whether to use only 'toxic' or 'both' datastores.
-            Defaults to "both".
-        model_name (str, optional): Base model to use. Defaults to "gpt2-large".
+        perspective_rate_limit (int, optional): Perspective API Rate Limit. Defaults to 30.
         toxic_train_file (str, optional): Path to train file with toxic comments.
             Defaults to "data/jigsaw/toxicity_gte0.5_clean.json".
         nontoxic_train_file (str, optional): Path to train file with nontoxic comments.
             Defaults to "data/jigsaw/toxicity_eq0_half_clean.json".
-        method (str, optional): Which method to use. Choices are: ensemble,
-            interpolation and interpolation_discourage. Defaults to "ensemble".
+        kind (str, optional): Kind of experiment to run. Defaults to "knn".
         lmbda (float, optional): Lambda (interpolation) or alpha (ensemble) value.
             Defaults to 2.0.
-        temperature (int, optional): kNN logprobs temperature parameter.
+        knn_temp (int, optional): kNN logprobs temperature parameter.
             Defaults to 100.
-        prompts_path (str, optional): Path to prompts path.
-            Defaults to "data/dexperts/prompts/nontoxic_prompts-10k.jsonl".
-        only_generate (bool, optional): Whether to skip datastore building and
-            index training or not. Defaults to False.
+        filter_p (float, optional): Filter probability for kNN logprobs.
+            Defaults to 0.9.
+        group_results_by (Optional[str], optional): Group results by attribute.
+            Defaults to None.
+        batch_size (int, optional): Batch size for generation. Defaults to 4.
+        custom_attrs (Optional[List[str]], optional): List of attributes to be
+            evaluated by Perspective API. If None, all attributes will be used. Some
+            languages only support "TOXICITY,". For more options, check Perspective's
+            documentation. Defaults to None.
 
     Raises:
+        NotImplementedError: Raised when unsupported option of `kind` is given.
         NotImplementedError: Raised when unsupported option of `dstores` is given.
 
     """
-    base_folder = Path(output_folder) / experiment_name / model_name
+    if kind != "knn":
+        raise NotImplementedError(f"Only 'knn' is supported. Got '{kind}'.")
+
+    output_folder = Path(output_folder) / experiment_name / model_name
 
     if not isinstance(toxic_tokens, Iterable) and isinstance(nontoxic_tokens, Iterable):
         toxic_tokens = (toxic_tokens,) * len(nontoxic_tokens)
@@ -83,16 +95,15 @@ def main(
         nontoxic_tokens
     ), "Must have same number of dstore sizes."
 
-    (base_folder / "logs").mkdir(parents=True, exist_ok=True)
-    configure_logger(base_folder / "logs/experiment.log")
+    (output_folder / "logs").mkdir(parents=True, exist_ok=True)
+    configure_logger(output_folder / "logs/experiment.log")
     logger = logging.getLogger(__name__)
 
     for dstore_tokens, other_dstore_tokens in zip(toxic_tokens, nontoxic_tokens):
-        dstore_dirs = ["--dstore_dir", "--other_dstore_dir"]
-        output_folder = (
-            base_folder / f"toxic={dstore_tokens}_nontoxic={other_dstore_tokens}"
+        curr_folder = (
+            output_folder / f"toxic={dstore_tokens}_nontoxic={other_dstore_tokens}"
         )
-        (output_folder / "logs").mkdir(parents=True, exist_ok=True)
+        (curr_folder / "logs").mkdir(parents=True, exist_ok=True)
 
         logger.info(f"{'====' * 5}")
         logger.info(
@@ -100,93 +111,64 @@ def main(
         )
         logger.info(f"{'====' * 5}")
 
+        paths = defaultdict(lambda: None)
         for i, train_file in enumerate([toxic_train_file, nontoxic_train_file]):
-            if i == 0:
-                tokens = dstore_tokens
-            elif i == 1:
-                tokens = other_dstore_tokens
-                if dstores == "toxic":
-                    dstore_dirs = dstore_dirs[:1]
-                    continue
-            elif dstores == "nontoxic":
-                raise NotImplementedError(
-                    "Currently, just using both datastores or just the toxic one is supported."
-                )
-
-            dstore = (
-                base_folder / "checkpoints" / f"gpt2_{Path(train_file).stem}_{tokens}"
-            )
-            dstore_dirs[i] = f"{dstore_dirs[i]} {dstore}"
-
-            if only_generate or dstore.exists():
-                logger.info(
-                    f"Skipping datastore build and index train for datastore {i}."
-                )
-                continue
-
+            toxicity = "toxic" if i == 0 else "nontoxic"
+            tokens = dstore_tokens if i == 0 else other_dstore_tokens
             if tokens:
                 logger.info(f"Datastore limited to {tokens} tokens.")
             else:
                 logger.info(f"Unlimited datastore.")
 
-            ds_cmd = f"""
-                python -u -m generation.knn_transformers.run_clm \
-                    --model_name_or_path {model_name} \
-                    --train_file {train_file} \
-                    --eval_subset train \
-                    --output_dir {dstore} \
-                    --dstore_dir {dstore} \
-                    {f'--dstore_size {tokens} --limit_eval_to_dstore' if tokens else ''} \
-                    --save_knnlm_dstore \
-                    --do_eval | tee {output_folder / f"logs/build_dstore_{i}.log"}
-            """
+            # Skipping dstore training logics
+            done_domains = (
+                open(output_folder / "logs/done_domains.txt").readlines()
+                if (output_folder / "logs/done_domains.txt").exists()
+                else []
+            )
+            done = False
+            if any(f"{tokens}, {toxicity}" in done for done in done_domains):
+                logger.info(f"Skipped {tokens}, {toxicity} build or train")
+                done = True
 
-            train_cmd = f"""
-                python -u -m generation.knn_transformers.run_clm \
-                    --model_name_or_path {model_name} \
-                    --train_file {train_file} \
-                    --eval_subset train \
-                    --output_dir {dstore} \
-                    --dstore_dir {dstore} \
-                    {f'--dstore_size {tokens}' if tokens else ''} \
-                    --build_index | tee {output_folder / f"logs/build_index_{i}.log"}
-            """
-            logger.info(f"Running `datastore build` command {i}: {ds_cmd}")
-            start_time = time.time()
-            os.system(ds_cmd)
-            logger.info(f"Execution time: {time.time() - start_time}")
-            torch.cuda.empty_cache()
-            gc.collect()
+            model_path = output_folder / f"checkpoints/{toxicity}/{tokens}"
+            if kind == "knn":
+                path = build_dstore(
+                    output_folder=model_path,
+                    train_file=train_file,
+                    model_name=model_name,
+                    toxicity=toxicity,
+                    dstore_size=tokens,
+                    log_folder=curr_folder / f"logs/build_dstore_{toxicity}.log",
+                    continue_writing=False,
+                    done=done,
+                )
+            else:
+                raise NotImplementedError(f"`kind` = {kind} not supported")
+            paths[toxicity] = path
 
-            logger.info(f"Running `index train` command {i}: {train_cmd}")
-            start_time = time.time()
-            os.system(train_cmd)
-            logger.info(f"Execution time: {time.time() - start_time}")
-            torch.cuda.empty_cache()
-            gc.collect()
+            if not done:
+                with open(output_folder / "logs/done_domains.txt", "a") as f:
+                    f.write(f"{tokens}, {toxicity}\n")
 
-        generate_cmd = f"""
-            python -m scripts.run_all \
-                --output_folder {output_folder} \
-                --perspective_rate_limit {rate_limit} \
-                --model_name {model_name} \
-                --prompts_path {prompts_path} \
-                {" ".join(dstore_dirs)} \
-                --knn True \
-                --method ensemble \
-                --lmbda {lmbda} \
-                --knn_temp {temperature} \
-                --method {method} \
-                {f'--num_prompts {num_prompts}' if num_prompts else ''} \
-                --batch_size 4
-        """
-
-        logger.info(f"Running `run_all` command: {generate_cmd}")
-        start_time = time.time()
-        os.system(generate_cmd)
-        logger.info(f"Execution time: {time.time() - start_time}")
-        torch.cuda.empty_cache()
-        gc.collect()
+        evaluate(
+            domain=f"dstore_size - {tokens}",
+            output_folder=curr_folder,
+            model_name=model_name,
+            prompts_path=prompts_path,
+            toxic_model=paths["toxic"],
+            nontoxic_model=paths["nontoxic"],
+            rate_limit=perspective_rate_limit,
+            group_results_by=group_results_by,
+            num_prompts=num_prompts,
+            kind=kind,
+            batch_size=batch_size,
+            perplexity_model=perplexity_model,
+            custom_attrs=custom_attrs,
+            lmbda=lmbda,
+            knn_temp=knn_temp,
+            filter_p=filter_p,
+        )
 
 
 if __name__ == "__main__":

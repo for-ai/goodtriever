@@ -5,11 +5,10 @@ from typing import Optional
 import fire
 import pandas as pd
 
-from scripts.utils.evaluation_metrics import (
+from scripts.evaluation.evaluation_metrics import (
     compute_distinctness,
     compute_ppl,
     compute_toxicity_prompted,
-    compute_toxicity_unprompted,
 )
 from utils.utils import structure_output_filepath
 
@@ -22,7 +21,7 @@ def main(
     model_name: str = "gpt2-xl",
     sample_perplexity: Optional[int] = 1000,
     threshold: float = 0.5,
-    group_toxicity_by: Optional[str] = None,
+    group_results_by: Optional[str] = None,
 ):
     """Compute toxicity and perplexity metrics for prompted or unprompted generations.
 
@@ -44,7 +43,7 @@ def main(
             Defaults to None.
         threshold (float, optional): Toxicity threshold.
             If higher than `threshold`, the text is toxic. Defaults to 0.5.
-        group_toxicity_by (str, optional): Column to group toxicity results by
+        group_results_by (str, optional): Column to group results by
             (i.e. a column containing different classes of interest). Only
             possible for prompted generation. Classes should be present in the
             `prompted_json` file. Defaults to None.
@@ -63,7 +62,7 @@ def main(
                 df,
                 output_file,
                 threshold=threshold,
-                group_toxicity_by=group_toxicity_by,
+                group_results_by=group_results_by,
             )
         else:
             warnings.warn(f"{output_file} already exists. Skipping.")
@@ -79,6 +78,7 @@ def main(
             output_file,
             sample_perplexity=sample_perplexity,
             threshold=threshold,
+            group_results_by=group_results_by,
         )
 
     if compute_diversity:
@@ -86,7 +86,7 @@ def main(
             step="diversity",
             previous_filename=path,
         )
-        compute_distinctness(df, output_file)
+        compute_distinctness(df, output_file, group_results_by=group_results_by)
 
 
 if __name__ == "__main__":

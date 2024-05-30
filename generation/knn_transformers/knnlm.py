@@ -243,7 +243,7 @@ class KNNWrapper(object):
                 description="dstore",
                 knns=knns,
                 vals=self.datastore.vals,
-                show_test_context=True,
+                show_inference_context=True,
             )
 
         if self.other_datastore is not None:
@@ -264,7 +264,7 @@ class KNNWrapper(object):
                         description="other_dstore",
                         knns=knns,
                         vals=self.other_datastore.vals,
-                        show_test_context=False,
+                        show_inference_context=False,
                     )
 
                 knn_log_probs = (knn_log_probs, other_knn_log_probs)

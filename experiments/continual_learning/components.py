@@ -1,5 +1,5 @@
-import subprocess
 import logging
+import subprocess
 
 from experiments.continual_learning.utils import run
 
@@ -16,6 +16,7 @@ def build_dstore(
     flat_index=False,
     done=False,
     log_folder="logs",
+    continue_writing=True,
 ):
     output_folder.mkdir(exist_ok=True, parents=True)
 
@@ -37,7 +38,7 @@ def build_dstore(
             --output_dir {output_folder} \
             --dstore_dir {output_folder} \
             --save_knnlm_dstore \
-            --continue_writing \
+            --continue_writing {continue_writing} \
             {f'--dstore_size {dstore_size} --limit_eval_to_dstore' if dstore_size else ''} \
             --do_eval | tee -a {log_folder}
     """
@@ -70,6 +71,7 @@ def train_expert(
     model_name,
     pretrained_path=None,
     epochs=1,
+    learning_rate=5e-5,
     block_size=128,
     batch_size=4,
     grad_accum=16,
@@ -98,8 +100,10 @@ def train_expert(
             --per_device_train_batch_size {batch_size} \
             --gradient_accumulation_steps {grad_accum} \
             --train_data_file {train_file} \
+            --learning_rate {learning_rate} \
             --overwrite_cache | tee -a {log_folder}
     """
+    logger.info(f"Running `finetune` command: {train_cmd}")
     run(train_cmd)
 
     return expert_path

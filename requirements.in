@@ -11,7 +11,7 @@ pandas
 matplotlib
 seaborn
 tensorboard
-transformers[torch]
+transformers[deepspeed]
 fsspec
 gcsfs
 psutil
@@ -21,7 +21,7 @@ nomic
 wordcloud
 
 # kNN-LM
-torch>=1.9.0
+torch<=1.13.1
 transformers
 datasets
 scipy
@@ -34,3 +34,10 @@ sentence_transformers
 hdbscan
 umap-learn
 altair
+
+wandb
+
+# quantization
+accelerate
+deepspeed
+bitsandbytes
